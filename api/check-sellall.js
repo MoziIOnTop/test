@@ -1,14 +1,18 @@
 // api/check-sellall.js
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   if (req.method !== "GET") {
-    return res.status(405).json({ ok: false, error: "method_not_allowed" });
+    res.statusCode = 405;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
   }
 
-  const username =
-    (req.query.username || req.query.user || "").toString().trim();
+  const query = req.query || {};
+  const username = (query.username || query.user || "").toString().trim();
 
   if (!username) {
-    return res.status(400).json({ ok: false, error: "missing_username" });
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ ok: false, error: "missing_username" }));
   }
 
   const channelId = process.env.DISCORD_CHANNEL_ID;
@@ -16,13 +20,15 @@ export default async function handler(req, res) {
   const ttlSec    = Number(process.env.SELL_TTL_SECONDS || "60");
 
   if (!channelId || !botToken) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "missing_bot_or_channel" });
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({
+      ok: false,
+      error: "missing_bot_or_channel"
+    }));
   }
 
   try {
-    // Lấy 50 tin nhắn gần nhất trong channel SellAll
     const resp = await fetch(
       `https://discord.com/api/v10/channels/${channelId}/messages?limit=50`,
       {
@@ -36,40 +42,45 @@ export default async function handler(req, res) {
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       console.error("discord messages error:", resp.status, text);
-      return res.status(500).json({ ok: false, error: "discord_error" });
+      res.statusCode = 500;
+      res.setHeader("Content-Type", "application/json");
+      return res.end(JSON.stringify({ ok: false, error: "discord_error" }));
     }
 
     const messages = await resp.json();
     const now = Date.now();
-
-    const target = `.sellall ${username.toLowerCase()}`;
-    let shouldSell = false;
-    const toDelete = [];
+    const targetPrefix = `.sellall ${username.toLowerCase()}`;
+    let sells = 0;
+    const toDelete   = [];
+    const toMarkUsed = [];
 
     for (const m of messages) {
       if (!m || !m.id || !m.timestamp) continue;
 
       const created = new Date(m.timestamp).getTime();
-      const ageSec = (now - created) / 1000;
+      const ageSec  = (now - created) / 1000;
+      const rawContent = (m.content || "").trim();
+      const content    = rawContent.toLowerCase();
 
-      // Quá 60s => dọn rác
+      // Hết TTL -> xoá
       if (ageSec > ttlSec) {
         toDelete.push(m.id);
         continue;
       }
 
-      // Còn trong TTL => check nội dung
-      if (!shouldSell && typeof m.content === "string") {
-        const content = m.content.toLowerCase().trim();
-        if (content === target) {
-          // Có ít nhất 1 lệnh còn hạn cho username này
-          shouldSell = true;
-          // KHÔNG xoá. Giữ đến hết 60s rồi lần sau sẽ bị dọn.
-        }
+      // Đã USED rồi -> bỏ
+      if (content.startsWith(targetPrefix) && content.includes("[used]")) {
+        continue;
+      }
+
+      // Lệnh mới cho user này
+      if (content === targetPrefix) {
+        sells = sells + 1;
+        toMarkUsed.push(m.id);
       }
     }
 
-    // Dọn tin nhắn hết hạn (> TTL)
+    // dọn rác
     if (toDelete.length > 0) {
       Promise.allSettled(
         toDelete.map((id) =>
@@ -77,18 +88,41 @@ export default async function handler(req, res) {
             `https://discord.com/api/v10/channels/${channelId}/messages/${id}`,
             {
               method: "DELETE",
-              headers: {
-                Authorization: `Bot ${botToken}`,
-              },
+              headers: { Authorization: `Bot ${botToken}` },
             }
           )
         )
       ).catch(() => {});
     }
 
-    return res.json({ ok: true, shouldSell });
+    // đánh dấu USED các lệnh đã dùng
+    if (toMarkUsed.length > 0) {
+      Promise.allSettled(
+        toMarkUsed.map((id) =>
+          fetch(
+            `https://discord.com/api/v10/channels/${channelId}/messages/${id}`,
+            {
+              method: "PATCH",
+              headers: {
+                Authorization: `Bot ${botToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                content: `.sellall ${username} [USED]`,
+              }),
+            }
+          )
+        )
+      ).catch(() => {});
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ ok: true, sells }));
   } catch (err) {
     console.error("check-sellall error:", err);
-    return res.status(500).json({ ok: false, error: "internal_error" });
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ ok: false, error: "internal_error" }));
   }
-}
+};
