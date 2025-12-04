@@ -1,4 +1,5 @@
 // api/check-sellall.js
+
 module.exports = async (req, res) => {
   if (req.method !== "GET") {
     res.statusCode = 405;
@@ -39,17 +40,26 @@ module.exports = async (req, res) => {
       }
     );
 
+    const status = resp.status;
+
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      console.error("discord messages error:", resp.status, text);
+      console.error("discord messages error:", status, text);
       res.statusCode = 500;
       res.setHeader("Content-Type", "application/json");
-      return res.end(JSON.stringify({ ok: false, error: "discord_error" }));
+      return res.end(
+        JSON.stringify({
+          ok: false,
+          error: "discord_error",
+          status,
+        })
+      );
     }
 
     const messages = await resp.json();
     const now = Date.now();
     const targetPrefix = `.sellall ${username.toLowerCase()}`;
+
     let sells = 0;
     const toDelete   = [];
     const toMarkUsed = [];
