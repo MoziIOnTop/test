@@ -1,138 +1,96 @@
 // api/check-sellall.js
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method !== "GET") {
-    res.statusCode = 405;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+    return res.status(405).json({ ok: false, error: "method_not_allowed" });
   }
 
-  const query = req.query || {};
-  const username = (query.username || query.user || "").toString().trim();
-
-  if (!username) {
-    res.statusCode = 400;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "missing_username" }));
-  }
-
+  const token = process.env.DISCORD_BOT_TOKEN;
   const channelId = process.env.DISCORD_CHANNEL_ID;
-  const botToken  = process.env.DISCORD_BOT_TOKEN;
-  const ttlSec    = Number(process.env.SELL_TTL_SECONDS || "60");
+  const ttlSeconds = Number(process.env.SELL_TTL_SECONDS || 60);
 
-  if (!channelId || !botToken) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({
-      ok: false,
-      error: "missing_bot_or_channel"
-    }));
+  if (!token || !channelId) {
+    return res
+      .status(500)
+      .json({ ok: false, error: "missing_discord_env" });
+  }
+
+  const username = (req.query.username || "").trim().toLowerCase();
+  if (!username) {
+    return res.status(400).json({ ok: false, error: "missing_username" });
   }
 
   try {
-    const resp = await fetch(
-      `https://discord.com/api/v10/channels/${channelId}/messages?limit=50`,
+    // 1) Lấy vài tin nhắn mới nhất trong channel
+    const discordResp = await fetch(
+      `https://discord.com/api/v10/channels/${channelId}/messages?limit=10`,
       {
         headers: {
-          Authorization: `Bot ${botToken}`,
-          "Content-Type": "application/json",
+          Authorization: `Bot ${token}`,
         },
       }
     );
 
-    const status = resp.status;
-
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      console.error("discord messages error:", status, text);
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      return res.end(
-        JSON.stringify({
-          ok: false,
-          error: "discord_error",
-          status,
-        })
-      );
+    if (!discordResp.ok) {
+      const text = await discordResp.text();
+      return res.status(200).json({
+        ok: true,
+        sells: 0,
+        debug: { status: discordResp.status, body: text },
+      });
     }
 
-    const messages = await resp.json();
+    const messages = await discordResp.json();
     const now = Date.now();
-    const targetPrefix = `.sellall ${username.toLowerCase()}`;
-
     let sells = 0;
-    const toDelete   = [];
-    const toMarkUsed = [];
 
-    for (const m of messages) {
-      if (!m || !m.id || !m.timestamp) continue;
+    for (const msg of messages) {
+      const content = (msg.content || "");
+      const lower = content.toLowerCase();
 
-      const created = new Date(m.timestamp).getTime();
-      const ageSec  = (now - created) / 1000;
-      const rawContent = (m.content || "").trim();
-      const content    = rawContent.toLowerCase();
+      // bỏ qua message đã [USED]
+      if (lower.startsWith("[used]")) continue;
 
-      // Hết TTL -> xoá
-      if (ageSec > ttlSec) {
-        toDelete.push(m.id);
-        continue;
+      // phải có ".sellall" + username
+      if (!lower.includes(".sellall")) continue;
+      if (!lower.includes(username)) continue;
+
+      // TTL 60s
+      const created = new Date(msg.timestamp).getTime();
+      const ageSec = (now - created) / 1000;
+      if (ageSec > ttlSeconds) continue;
+
+      // Đến đây là 1 lệnh hợp lệ -> mark USED để không dùng lần 2
+      try {
+        await fetch(
+          `https://discord.com/api/v10/channels/${channelId}/messages/${msg.id}`,
+          {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bot ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              content: `[USED] ${content}`,
+            }),
+          }
+        );
+      } catch (e) {
+        // ignore lỗi edit, nhưng vẫn tính là đã sell
       }
 
-      // Đã USED rồi -> bỏ
-      if (content.startsWith(targetPrefix) && content.includes("[used]")) {
-        continue;
-      }
-
-      // Lệnh mới cho user này
-      if (content === targetPrefix) {
-        sells = sells + 1;
-        toMarkUsed.push(m.id);
-      }
+      sells += 1;
+      // mỗi message chỉ dùng 1 lần, nên break nếu muốn 1 sell / 1 lần check
+      // break;
     }
 
-    // dọn rác
-    if (toDelete.length > 0) {
-      Promise.allSettled(
-        toDelete.map((id) =>
-          fetch(
-            `https://discord.com/api/v10/channels/${channelId}/messages/${id}`,
-            {
-              method: "DELETE",
-              headers: { Authorization: `Bot ${botToken}` },
-            }
-          )
-        )
-      ).catch(() => {});
-    }
-
-    // đánh dấu USED các lệnh đã dùng
-    if (toMarkUsed.length > 0) {
-      Promise.allSettled(
-        toMarkUsed.map((id) =>
-          fetch(
-            `https://discord.com/api/v10/channels/${channelId}/messages/${id}`,
-            {
-              method: "PATCH",
-              headers: {
-                Authorization: `Bot ${botToken}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                content: `.sellall ${username} [USED]`,
-              }),
-            }
-          )
-        )
-      ).catch(() => {});
-    }
-
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: true, sells }));
+    return res.status(200).json({ ok: true, sells });
   } catch (err) {
     console.error("check-sellall error:", err);
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+    return res.status(200).json({
+      ok: true,
+      sells: 0,
+      debug: { error: "exception" },
+    });
   }
-};
+}
