@@ -1,68 +1,43 @@
 // api/sellall-dispatch.js
-module.exports = async (req, res) => {
+// Nhận { content } từ Railway A, forward sang Discord webhook thật
+
+const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.statusCode = 405;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+    return res.status(405).json({ ok: false, error: "method_not_allowed" });
   }
 
-  let body = "";
-  for await (const chunk of req) {
-    body += chunk;
+  if (!WEBHOOK_URL) {
+    console.error("[VERCEL] Missing DISCORD_WEBHOOK_URL env");
+    return res.status(500).json({ ok: false, error: "missing_webhook" });
   }
 
-  let payload = {};
-  try {
-    payload = JSON.parse(body || "{}");
-  } catch (e) {
-    payload = {};
-  }
+  const body = req.body || {};
+  const content = (body.content || "").trim();
 
-  const username = (payload.user || "").trim();
-  const cmd      = (payload.cmd  || "").trim().toLowerCase();
-
-  if (!username || cmd !== "sellall") {
-    res.statusCode = 400;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "bad_payload" }));
-  }
-
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "missing_webhook" }));
+  if (!content) {
+    return res.status(400).json({ ok: false, error: "missing_content" });
   }
 
   try {
-    const resp = await fetch(webhookUrl + "?wait=true", {
+    const resp = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: `.sellall ${username}`,
-        allowed_mentions: { parse: [] }
-      }),
+      body: JSON.stringify({ content }),
     });
 
     if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      console.error("Discord webhook error", resp.status, text);
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      return res.end(JSON.stringify({
-        ok: false,
-        error: "discord_error",
-        status: resp.status
-      }));
+      const text = await resp.text();
+      console.error("[VERCEL] Discord webhook error", resp.status, text);
+      return res
+        .status(500)
+        .json({ ok: false, error: "discord_error", status: resp.status });
     }
 
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: true }));
+    return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error("sellall-dispatch exception:", err);
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    return res.end(JSON.stringify({ ok: false, error: "exception" }));
+    console.error("[VERCEL] Unexpected error:", err);
+    return res.status(500).json({ ok: false, error: "exception" });
   }
-};
+}
